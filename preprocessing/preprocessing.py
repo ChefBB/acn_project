@@ -16,6 +16,49 @@ Contains functions for preprocessing the data
 """
 
 from typing import Optional, List, Sequence, Dict, Any
+from transformers import AutoTokenizer, AutoModelForMaskedLM
+import torch
+import torch.nn.functional as F
+
+
+model_name = "dbmdz/bert-base-italian-xxl-cased"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForMaskedLM.from_pretrained(model_name)
+model.eval()
+
+# TODO
+NAMED_ENTITIES = {}
+
+
+MASK = '[MASK]'
+
+
+def compute_suspicion(text: str) -> list:
+    tokens = text.split()
+    output_tokens = []
+
+    for token in tokens:
+        # Encode a single token
+        encoded = tokenizer(token, return_tensors="pt")
+
+        # Forward pass (model defined outside)
+        with torch.no_grad():
+            logits = model(**encoded).logits
+
+        # Example heuristic:
+        #   Suppose index 1 = "wrong" class in your classifier head.
+        #   Change this to match your model’s output format.
+        probs = logits.softmax(dim=-1)
+        wrong_prob = probs[0, 1].item()
+
+        # Decide if suspicious
+        if wrong_prob > 0.5:   # threshold adjustable
+            output_tokens.append(MASK)
+        else:
+            output_tokens.append(token)
+
+    return output_tokens
+
 
 
 def ocr_correction(text: str,
