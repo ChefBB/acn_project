@@ -16,211 +16,188 @@ Contains functions for preprocessing the data
 """
 
 from typing import Optional, List, Sequence, Dict, Any
-from transformers import AutoTokenizer, AutoModelForMaskedLM
 import torch
 import torch.nn.functional as F
+from transformers import (
+    AutoTokenizer,
+    AutoModelForMaskedLM
+)
+import os
+import re
 
 
-model_name = "dbmdz/bert-base-italian-xxl-cased"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForMaskedLM.from_pretrained(model_name)
+# import entities
+parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
+dataset_dir = os.path.abspath(os.path.join(parent_dir, os.pardir)) + '/dataset/dict_all'
+
+with open(f'{dataset_dir}/entity_all_1.txt') as f:
+    ENTITIES = set()
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        first = line.split()[0]
+        ENTITIES.add(first)
+        
+with open(f'{dataset_dir}/entity_all_2.txt') as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        first = line.split()[0]
+        ENTITIES.add(first)
+
+
+MODEL = "dbmdz/bert-base-italian-uncased"
+PROB_THRESHOLD = 0.02  # mask tokens with probability lower than this
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL)
+model = AutoModelForMaskedLM.from_pretrained(MODEL)
 model.eval()
-
-# TODO
-NAMED_ENTITIES = {}
-
-
-MASK = '[MASK]'
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
 
 
-def compute_suspicion(text: str) -> list:
-    tokens = text.split()
-    output_tokens = []
+def replace_entities_with_placeholders(sentence, entities):
+    """
+    Replace entities with placeholders safely without regex looping issues.
+    Returns processed_sentence and a map placeholder -> entity.
+    """
+    placeholder_map = {}
+    processed_sentence = sentence
 
-    for token in tokens:
-        # Encode a single token
-        encoded = tokenizer(token, return_tensors="pt")
+    # Sort entities by length descending to replace longer entities first
+    entities_sorted = sorted(entities, key=len, reverse=True)
+    
+    # Track replacements using character indices
+    replacements = []
+    for i, ent in enumerate(entities_sorted):
+        start = 0
+        while True:
+            idx = processed_sentence.find(ent, start)
+            if idx == -1:
+                break
+            placeholder = f'ENTITY{i}'
+            replacements.append((idx, idx+len(ent), placeholder, ent))
+            start = idx + len(ent)
+    
+    # Sort replacements by start index descending so we don't shift earlier indices
+    replacements.sort(key=lambda x: x[0], reverse=True)
+    
+    for start_idx, end_idx, placeholder, ent in replacements:
+        processed_sentence = processed_sentence[:start_idx] + placeholder + processed_sentence[end_idx:]
+        placeholder_map[placeholder] = ent
 
-        # Forward pass (model defined outside)
+    return processed_sentence, placeholder_map
+
+
+
+def mask_suspicious_subwords(sentence, prob_threshold=PROB_THRESHOLD, entities=ENTITIES):
+    """
+    Mask suspicious subwords based on model probability, but treat named entities as single units
+    that are not split into subwords and are never masked.
+
+    Args:
+        sentence (str): input sentence
+        prob_threshold (float): probability threshold for masking
+        entities (set of str): full named entities to skip masking
+
+    Returns:
+        masked_tokens: list of subwords with [MASK] where suspicious
+        masked_word_indices: list of (start_idx, end_idx) for consecutive masked subwords
+    """
+    processed_sentence, placeholder_map = replace_entities_with_placeholders(sentence, ENTITIES)
+
+    # tokenization
+    tokens = tokenizer.tokenize(processed_sentence)
+    masked_tokens = []
+    masked_word_indices = []
+    i = 0
+    n = len(tokens)
+
+    while i < n:
+        tok = tokens[i]
+
+        # Skip masking if token is a placeholder
+        if tok in placeholder_map:
+            masked_tokens.append(tok)
+            i += 1
+            continue
+
+        # Probability-based masking
+        temp_tokens = tokens.copy()
+        temp_tokens[i] = tokenizer.mask_token
+        input_ids = tokenizer.convert_tokens_to_ids(temp_tokens)
+        input_ids = torch.tensor([input_ids]).to(device)
+
         with torch.no_grad():
-            logits = model(**encoded).logits
+            outputs = model(input_ids)
+            logits = outputs.logits
+            probs = torch.softmax(logits[0, i], dim=-1)
+            tok_id = tokenizer.convert_tokens_to_ids(tok)
+            token_prob = probs[tok_id].item()
 
-        # Example heuristic:
-        #   Suppose index 1 = "wrong" class in your classifier head.
-        #   Change this to match your model’s output format.
-        probs = logits.softmax(dim=-1)
-        wrong_prob = probs[0, 1].item()
-
-        # Decide if suspicious
-        if wrong_prob > 0.5:   # threshold adjustable
-            output_tokens.append(MASK)
+        if token_prob < prob_threshold:
+            start_idx = len(masked_tokens)
+            masked_tokens.append(tokenizer.mask_token)
+            j = i + 1
+            # Group consecutive subwords starting with '##'
+            while j < n and tokens[j].startswith("##"):
+                temp_tokens2 = tokens.copy()
+                temp_tokens2[j] = tokenizer.mask_token
+                input_ids2 = tokenizer.convert_tokens_to_ids(temp_tokens2)
+                input_ids2 = torch.tensor([input_ids2]).to(device)
+                with torch.no_grad():
+                    outputs2 = model(input_ids2)
+                    logits2 = outputs2.logits
+                    probs2 = torch.softmax(logits2[0, j], dim=-1)
+                    tok_id2 = tokenizer.convert_tokens_to_ids(tokens[j])
+                    token_prob2 = probs2[tok_id2].item()
+                if token_prob2 < prob_threshold:
+                    masked_tokens.append(tokenizer.mask_token)
+                else:
+                    masked_tokens.append(tokens[j])
+                j += 1
+            end_idx = len(masked_tokens) - 1
+            masked_word_indices.append((start_idx, end_idx))
+            i = j
         else:
-            output_tokens.append(token)
+            masked_tokens.append(tok)
+            i += 1
 
-    return output_tokens
+    # restore original entities
+    masked_tokens = [placeholder_map.get(t, t) for t in masked_tokens]
+
+    return masked_tokens, masked_word_indices
 
 
-
-def ocr_correction(text: str,
-                   model_path: Optional[str] = None,
-                   use_remote: bool = False,
-                   device: str = "cpu",
-                   batch_size: int = 32,
-                   verbose: bool = False) -> str:
+def substitute_masked_tokens(masked_tokens, masked_word_indices):
     """
+    Substitute masked words made of multiple subwords as a single unit.
     """
-    raise NotImplementedError("Implement OCR correction using the chosen model/service.")
+    substituted_tokens = masked_tokens.copy()
 
+    for start, end in masked_word_indices:
+        # Prepare input
+        input_ids = tokenizer.convert_tokens_to_ids(substituted_tokens)
+        input_ids = torch.tensor([input_ids]).to(device)
 
-def normalize_unicode(text: str,
-                      form: str = "NFC",
-                      remove_unsupported: bool = True,
-                      allowed_categories: Optional[Sequence[str]] = None) -> str:
-    """
-    Normalize Unicode and optionally remove unsupported characters.
-    Flags to be completed:
-    - form: one of 'NFC', 'NFD', 'NFKC', 'NFKD'.
-    - remove_unsupported: drop characters outside a supported set.
-    - allowed_categories: sequence of Unicode category prefixes to keep (e.g. ['L','N','P','Z']).
+        with torch.no_grad():
+            outputs = model(input_ids)
+            logits = outputs.logits
 
-    Expected behavior:
-    - Apply unicodedata.normalize(form, text).
-    - Optionally drop or replace characters that are not in allowed categories.
-    - Return normalized text.
+        # For multiple consecutive masks, predict each mask
+        # then combine predictions into a single word
+        predicted_tokens = []
+        for idx in range(start, end + 1):
+            mask_logits = logits[0, idx]
+            top_id = torch.topk(mask_logits, 1).indices.item()
+            predicted_token = tokenizer.convert_ids_to_tokens(top_id)
+            predicted_tokens.append(predicted_token)
 
-    TODO: implement category filtering and replacement policy.
-    """
-    raise NotImplementedError("Implement Unicode normalization and filtering.")
+        # Replace the masked tokens with the predicted tokens
+        substituted_tokens[start:end+1] = predicted_tokens
 
-
-def lowercase(text: str, aggressive: bool = False) -> str:
-    """
-    Convert text to lower case.
-    Flags to be completed:
-    - aggressive: if True, lower-case language-specific markers and handle edge cases (e.g. preserve acronyms if needed).
-
-    Expected behavior:
-    - Return a lower-cased version of text, with optional heuristic exceptions when aggressive=False.
-
-    TODO: implement language-aware handling if required.
-    """
-    raise NotImplementedError("Implement lowercasing with optional heuristics.")
-
-
-def split_sentences(text: str,
-                    method: str = "simple",
-                    language: str = "it",
-                    keep_line_breaks: bool = False) -> List[str]:
-    """
-    Split text into sentences (one sentence per item in the returned list).
-    Flags to be completed:
-    - method: 'simple' (regex) or 'punkt'/'spacy' for model-based splitting.
-    - language: language code to select language-specific rules.
-    - keep_line_breaks: if True, preserve blank-line paragraph separators.
-
-    Expected behavior:
-    - Return a list of sentence strings, cleaned of leading/trailing whitespace.
-    - If keeping original newlines is important, provide a mapping or marker.
-
-    TODO: implement chosen sentence segmentation method and edge-case handling.
-    """
-    raise NotImplementedError("Implement sentence splitting using the chosen method.")
-
-
-def handle_broken_words(text: str,
-                        join_hyphenated: bool = True,
-                        max_line_gap: int = 0,
-                        preserve_tokens: Optional[Sequence[str]] = None) -> str:
-    """
-    Fix words broken across line breaks or by hyphenation.
-    Flags to be completed:
-    - join_hyphenated: join words that were split with a hyphen at line end.
-    - max_line_gap: maximum number of intervening newlines allowed when rejoining (0 = immediate line break).
-    - preserve_tokens: tokens that should not be joined (e.g. known abbreviations).
-
-    Expected behavior:
-    - Detect patterns like 'exam-\nple' and convert to 'example'.
-    - Be conservative to avoid joining genuine hyphenated compounds incorrectly.
-
-    TODO: implement robust heuristics and optional dictionary lookup.
-    """
-    raise NotImplementedError("Implement broken-word rejoining logic.")
-
-
-def normalize_whitespace(text: str,
-                         collapse_spaces: bool = True,
-                         collapse_newlines: bool = False,
-                         trim: bool = True) -> str:
-    """
-    Normalize whitespace in text.
-    Flags to be completed:
-    - collapse_spaces: replace sequences of spaces/tabs with a single space.
-    - collapse_newlines: replace multiple consecutive newlines with a single newline.
-    - trim: strip leading/trailing whitespace from the whole text.
-
-    Expected behavior:
-    - Clean up duplicated spaces and optionally reduce multiple blank lines.
-    - Preserve single newlines between sentences if required.
-
-    TODO: implement regex-based normalization with configurable options.
-    """
-    raise NotImplementedError("Implement whitespace normalization.")
-
-
-def normalize_quotes_and_accents(text: str,
-                                 map_smart_quotes: bool = True,
-                                 normalize_apostrophes: bool = True,
-                                 ascii_fallback: bool = False,
-                                 accent_map: Optional[Dict[str, str]] = None) -> str:
-    """
-    Normalize quotes, apostrophes, and accent characters.
-    Flags to be completed:
-    - map_smart_quotes: convert “ ” ‘ ’ to " and ' respectively.
-    - normalize_apostrophes: unify different apostrophe characters into a single codepoint.
-    - ascii_fallback: replace accented letters with ASCII approximations if True.
-    - accent_map: optional custom mapping for accent normalization.
-
-    Expected behavior:
-    - Standardize punctuation characters that commonly vary in OCR output.
-    - Optionally transliterate accents when downstream systems require ASCII.
-
-    TODO: implement mapping tables and optional transliteration.
-    """
-    raise NotImplementedError("Implement quote and accent normalization.")
-
-
-def preprocess_pipeline(text: str,
-                        do_ocr_correction: bool = False,
-                        do_unicode_normalize: bool = True,
-                        do_lowercase: bool = True,
-                        do_handle_broken: bool = True,
-                        do_split_sentences: bool = True,
-                        do_whitespace_normalize: bool = True,
-                        do_quote_normalize: bool = True,
-                        ocr_options: Optional[Dict[str, Any]] = None,
-                        unicode_options: Optional[Dict[str, Any]] = None,
-                        split_options: Optional[Dict[str, Any]] = None,
-                        broken_options: Optional[Dict[str, Any]] = None,
-                        whitespace_options: Optional[Dict[str, Any]] = None,
-                        quote_options: Optional[Dict[str, Any]] = None) -> List[str]:
-    """
-    High-level preprocessing pipeline orchestrator.
-    Flags to be completed:
-    - per-step booleans to enable/disable each preprocessing stage.
-    - options dictionaries to pass step-specific flags.
-
-    Expected behavior:
-    - Apply steps in a sensible order:
-    1) OCR correction (optional)
-    2) Unicode normalization
-    3) Normalize quotes/apostrophes/accents
-    4) Handle broken words (join hyphenated line-break splits)
-    5) Lowercase (optional)
-    6) Whitespace normalization
-    7) Sentence splitting -> return list of sentences (one per line)
-    - Return the final list of preprocessed sentences.
-
-    TODO: implement calling sequence, thread-safety, progress reporting, and unit tests.
-    """
-    raise NotImplementedError("Implement the preprocessing pipeline orchestration.")
-
+    # Merge subwords into a string
+    substituted_sentence = tokenizer.convert_tokens_to_string(substituted_tokens)
+    return substituted_sentence
