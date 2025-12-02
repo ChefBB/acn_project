@@ -48,7 +48,7 @@ with open(f'{dataset_dir}/entity_all_2.txt') as f:
         ENTITIES.add(first)
 
 
-MODEL = "dbmdz/bert-base-italian-uncased"
+MODEL = "osiria/blaze-it"
 PROB_THRESHOLD = 0.02  # mask tokens with probability lower than this
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
