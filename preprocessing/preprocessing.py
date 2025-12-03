@@ -28,18 +28,10 @@ import re
 
 # import entities
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
-dataset_dir = os.path.abspath(os.path.join(parent_dir, os.pardir)) + '/dataset/dict_all'
+dataset_dir = os.path.abspath(os.path.join(parent_dir, os.pardir)) + '\\dataset\\dict_all'
 
-with open(f'{dataset_dir}/entity_all_1.txt') as f:
+with open(f'{dataset_dir}\\entity_all.dict', encoding='utf-8') as f:
     ENTITIES = set()
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        first = line.split()[0]
-        ENTITIES.add(first)
-        
-with open(f'{dataset_dir}/entity_all_2.txt') as f:
     for line in f:
         line = line.strip()
         if not line:
