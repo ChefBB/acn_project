@@ -1,3 +1,4 @@
 *.txt
 \year_clean
 *.bin
+*.vec
