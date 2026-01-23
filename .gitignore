@@ -2,3 +2,5 @@
 \year_clean
 *.bin
 *.vec
+\frequencies_nopropn
+\frequencies_all
