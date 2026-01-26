@@ -4,3 +4,5 @@
 *.vec
 \frequencies_nopropn
 \frequencies_all
+*.tsv
+*.zip
