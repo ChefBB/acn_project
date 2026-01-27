@@ -2,6 +2,10 @@ This repository contains the code developed for a network-driven study of langua
 
 The code is divided into two parts:
 
-1. **Data understanding & preparation**: the folder ```data_understanding``` contains simple insights about the data. The folder ```preprocessing``` contains the correction of OCR mistakes and the subsequent lemmatization. Finally, ```embedding``` is composed of files that use FastextIT to create word embeddings.
+1. **Data understanding & preparation**
+ - The folder ```data_understanding``` contains simple insights about the data;
+ - ```preprocessing``` contains the correction of OCR mistakes (from ```year_clean``` to ```ocr_clean```) and the subsequent lemmatization (from ```ocr_clean``` to ```lemmas```);
+ - ```embedding``` contains the embedding models creation and the subsequent word embeddings (from ```lemmas``` to ```word_embeddings_all```); 
+ - ```edges_analysis``` contains a post-processing strategy and some analyses for the similarity cutoff. This code provides the first baseline to build the networks (from ```embedding``` to ```edges```).
 
 2. **Network Analysis**
